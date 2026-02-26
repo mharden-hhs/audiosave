@@ -79,7 +79,6 @@
       color: var(--muted);
     }
 
-    /* Server status indicator */
     .server-status {
       display: flex;
       align-items: center;
@@ -95,11 +94,11 @@
       border-radius: 50%;
       background: var(--muted);
       transition: background 0.3s;
+      flex-shrink: 0;
     }
     .status-dot.online  { background: var(--success); box-shadow: 0 0 6px var(--success); }
     .status-dot.offline { background: var(--error);   box-shadow: 0 0 6px var(--error); }
 
-    /* Card */
     .card {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -126,6 +125,11 @@
       margin-bottom: 10px;
     }
 
+    .input-wrap {
+      position: relative;
+      margin-bottom: 28px;
+    }
+
     input[type="text"] {
       width: 100%;
       background: var(--bg);
@@ -136,11 +140,56 @@
       padding: 14px 16px;
       outline: none;
       transition: border-color 0.2s;
-      margin-bottom: 28px;
     }
 
     input[type="text"]:focus { border-color: var(--accent); }
     input[type="text"]::placeholder { color: var(--muted); }
+
+    /* Filename field with fetching state */
+    .filename-wrap {
+      position: relative;
+      margin-bottom: 28px;
+    }
+
+    .filename-wrap input {
+      width: 100%;
+      padding-right: 90px; /* room for badge */
+    }
+
+    .filename-badge {
+      position: absolute;
+      right: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      padding: 3px 8px;
+      border-radius: 2px;
+      pointer-events: none;
+      display: none;
+    }
+
+    .filename-badge.fetching {
+      display: block;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      opacity: 0.7;
+    }
+
+    .filename-badge.auto {
+      display: block;
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+
+    .filename-hint {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 6px;
+    }
 
     .format-row {
       display: flex;
@@ -193,13 +242,11 @@
       cursor: not-allowed;
     }
 
-    /* Status panel */
     .status-panel {
       display: none;
       border: 1px solid var(--border);
       padding: 24px;
       background: var(--surface);
-      margin-bottom: 0;
     }
     .status-panel.visible { display: block; }
 
@@ -243,7 +290,6 @@
       100% { transform: translateX(280%);  width: 40%; }
     }
 
-    /* Info strip */
     .info-strip {
       display: flex;
       gap: 24px;
@@ -263,7 +309,6 @@
 
     .info-item .info-val { font-size: 13px; }
 
-    /* Spinner */
     .spinner {
       display: inline-block;
       width: 10px; height: 10px;
@@ -275,8 +320,8 @@
       vertical-align: middle;
     }
 
-    @keyframes spin    { to { transform: rotate(360deg); } }
-    @keyframes fadeUp  {
+    @keyframes spin   { to { transform: rotate(360deg); } }
+    @keyframes fadeUp {
       from { opacity: 0; transform: translateY(16px); }
       to   { opacity: 1; transform: translateY(0); }
     }
@@ -306,7 +351,16 @@
 
   <div class="card">
     <label for="urlInput">YouTube URL</label>
-    <input type="text" id="urlInput" placeholder="https://youtube.com/watch?v=..." />
+    <div class="input-wrap">
+      <input type="text" id="urlInput" placeholder="https://youtube.com/watch?v=..." />
+    </div>
+
+    <label for="filenameInput">Filename</label>
+    <div class="filename-wrap">
+      <input type="text" id="filenameInput" placeholder="Enter a name or paste a URL to auto-fill..." />
+      <span class="filename-badge" id="filenameBadge"></span>
+    </div>
+    <p class="filename-hint" id="filenameHint" style="margin-bottom:28px; display:none;"></p>
 
     <label>Output Format</label>
     <div class="format-row">
@@ -351,6 +405,8 @@
 <script>
   const SERVER = 'http://localhost:5001';
   let selectedFormat = 'mp3';
+  let titleFetchTimer = null;
+  let lastFetchedUrl  = '';
 
   // ── Format toggle ───────────────────────────────────────
   document.querySelectorAll('.format-btn').forEach(btn => {
@@ -361,24 +417,88 @@
     });
   });
 
-  // ── Server health check on load ─────────────────────────
+  // ── Server health check ─────────────────────────────────
   async function checkServer() {
     const dot  = document.getElementById('statusDot');
     const text = document.getElementById('statusText');
     try {
       const res = await fetch(`${SERVER}/health`, { signal: AbortSignal.timeout(3000) });
       if (res.ok) {
-        dot.className  = 'status-dot online';
+        dot.className    = 'status-dot online';
         text.textContent = 'Local server online';
         return true;
       }
     } catch (_) {}
-    dot.className  = 'status-dot offline';
-    text.textContent = 'Local server offline — run: python server.py';
+    dot.className    = 'status-dot offline';
+    text.textContent = 'Local server offline — run: python3 server.py';
     return false;
   }
 
   checkServer();
+
+  // ── Auto-fetch title when URL is pasted ─────────────────
+  document.getElementById('urlInput').addEventListener('input', () => {
+    clearTimeout(titleFetchTimer);
+    const url = document.getElementById('urlInput').value.trim();
+
+    if (!url.includes('youtube.com') && !url.includes('youtu.be')) return;
+    if (url === lastFetchedUrl) return;
+
+    // Debounce — wait 600ms after user stops typing
+    titleFetchTimer = setTimeout(() => fetchTitle(url), 600);
+  });
+
+  async function fetchTitle(url) {
+    const input = document.getElementById('filenameInput');
+    const badge = document.getElementById('filenameBadge');
+    const hint  = document.getElementById('filenameHint');
+
+    // Don't overwrite if user already typed a custom name
+    if (input.dataset.userEdited === 'true') return;
+
+    badge.textContent = 'Fetching...';
+    badge.className   = 'filename-badge fetching';
+    input.placeholder = 'Fetching title...';
+
+    try {
+      const res  = await fetch(`${SERVER}/title`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+
+      if (data.title) {
+        input.value           = data.title;
+        input.dataset.autoFilled = 'true';
+        badge.textContent     = 'Auto';
+        badge.className       = 'filename-badge auto';
+        hint.textContent      = 'Title fetched from video — edit freely.';
+        hint.style.display    = 'block';
+        lastFetchedUrl        = url;
+      } else {
+        badge.className = 'filename-badge';
+        hint.style.display = 'none';
+      }
+    } catch (_) {
+      badge.className    = 'filename-badge';
+      hint.style.display = 'none';
+      input.placeholder  = 'Enter a name or paste a URL to auto-fill...';
+    }
+  }
+
+  // Track if user manually edits the filename field
+  document.getElementById('filenameInput').addEventListener('input', function() {
+    if (this.dataset.autoFilled === 'true') {
+      // User is editing an auto-filled value — that's fine, just clear the auto flag
+      this.dataset.autoFilled = '';
+    }
+    this.dataset.userEdited = this.value.trim() ? 'true' : '';
+    const badge = document.getElementById('filenameBadge');
+    if (this.dataset.userEdited) {
+      badge.className = 'filename-badge';
+    }
+  });
 
   // ── UI helpers ──────────────────────────────────────────
   function setStatus(msg, type = 'loading') {
@@ -397,34 +517,34 @@
 
   // ── Main extraction ─────────────────────────────────────
   async function startExtraction() {
-    const url = document.getElementById('urlInput').value.trim();
-    const btn = document.getElementById('extractBtn');
+    const url      = document.getElementById('urlInput').value.trim();
+    const filename = document.getElementById('filenameInput').value.trim();
+    const btn      = document.getElementById('extractBtn');
 
     if (!url) {
       setStatus('Please enter a YouTube URL.', 'error');
       return;
     }
-
     if (!url.includes('youtube.com') && !url.includes('youtu.be')) {
-      setStatus('That doesn\'t look like a YouTube URL.', 'error');
+      setStatus("That doesn't look like a YouTube URL.", 'error');
       return;
     }
 
     const online = await checkServer();
     if (!online) {
-      setStatus('Cannot reach local server. Make sure <code>python server.py</code> is running.', 'error');
+      setStatus('Cannot reach local server. Make sure <code>python3 server.py</code> is running.', 'error');
       return;
     }
 
     btn.disabled = true;
-    setStatus('Sending to local server...', 'loading');
+    setStatus('Extracting audio...', 'loading');
     showProgress(true);
 
     try {
       const response = await fetch(`${SERVER}/extract`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, format: selectedFormat }),
+        body: JSON.stringify({ url, format: selectedFormat, filename }),
       });
 
       if (!response.ok) {
@@ -432,25 +552,24 @@
         throw new Error(err.error || `HTTP ${response.status}`);
       }
 
-      // ── Trigger browser download ──────────────────────
       const blob        = await response.blob();
       const disposition = response.headers.get('Content-Disposition') || '';
       const nameMatch   = disposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)/i);
-      const fileName    = nameMatch
+      const finalName   = nameMatch
         ? decodeURIComponent(nameMatch[1].trim())
         : `audio.${selectedFormat}`;
 
       const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href     = objectUrl;
-      a.download = fileName;
+      a.download = finalName;
       document.body.appendChild(a);
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(objectUrl), 5000);
 
       showProgress(false);
-      setStatus(`✓ Downloaded: <strong>${fileName}</strong>`, 'success');
+      setStatus(`✓ Downloaded: <strong>${finalName}</strong>`, 'success');
 
     } catch (err) {
       showProgress(false);
@@ -460,7 +579,6 @@
     }
   }
 
-  // Allow Enter key to submit
   document.getElementById('urlInput').addEventListener('keydown', e => {
     if (e.key === 'Enter') startExtraction();
   });
